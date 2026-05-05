@@ -1,0 +1,95 @@
+﻿// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © fintred
+//@version=6
+indicator("Delta with Trap Filters", overlay=false, precision=4)
+
+// ==============================================================================
+// НАСТРОЙКИ ПАРАМЕТРОВ (входные данные для гибкой настройки)
+// ==============================================================================
+group_filters = "Фильтры и Параметры"
+sma_period = input.int(20, "Период SMA дельты", minval=1, maxval=100, group=group_filters)
+shadow_ratio = input.float(2.0, "Мин. отношение тени к телу", minval=1.0, maxval=5.0, step=0.1, group=group_filters)
+delta_strength_mult = input.float(1.5, "Множитель силы дельты", minval=1.0, maxval=3.0, step=0.1, group=group_filters)
+volume_mult = input.float(1.0, "Множитель объема", minval=0.5, maxval=3.0, step=0.1, group=group_filters)
+
+// ==============================================================================
+// РАСЧЕТ ДЕЛЬТЫ ПО МЕТОДОЛОГИИ DELTA RIVER (пропорциональное распределение объема)
+// ==============================================================================
+// 1. Рассчитываем части свечи
+upper_shadow = high - math.max(open, close)  // верхняя тень
+lower_shadow = math.min(open, close) - low   // нижняя тень
+body = math.abs(close - open)                // тело свечи
+
+// 2. Определяем пропорции для распределения объема
+total_range = upper_shadow + body + lower_shadow
+total_range := total_range == 0 ? 1 : total_range  // защита от деления на ноль
+
+// 3. Доли объема для каждой части свечи
+upper_shadow_ratio = upper_shadow / total_range
+body_ratio = body / total_range
+lower_shadow_ratio = lower_shadow / total_range
+
+// 4. РАСПРЕДЕЛЕНИЕ ОБЪЕМА ПО ЗОНАМ (корректная область видимости переменных)
+upper_shadow_volume = volume * upper_shadow_ratio
+body_volume = volume * body_ratio
+lower_shadow_volume = volume * lower_shadow_ratio
+
+// Для бычьей свечи (close >= open): тело + нижняя тень = покупки, верхняя тень = продажи
+// Для медвежьей свечи (close < open): нижняя тень = покупки, тело + верхняя тень = продажи
+buy_volume = close >= open ? (body_volume + lower_shadow_volume) : lower_shadow_volume
+sell_volume = close >= open ? upper_shadow_volume : (body_volume + upper_shadow_volume)
+
+// 5. Рассчитываем дельту как разницу между покупками и продажами
+delta = buy_volume - sell_volume
+
+// ==============================================================================
+// СКОЛЬЗЯЩИЕ СРЕДНИЕ ДЕЛЬТЫ И ОБЪЕМА (ВЫНЕСЕНЫ ЗА ПРЕДЕЛЫ УСЛОВИЙ ДЛЯ КОРРЕКТНОЙ РАБОТЫ)
+// ==============================================================================
+// КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: все вызовы ta.sma() выполняются НА КАЖДОМ БАРЕ глобально
+delta_sma_filter = ta.sma(delta, sma_period)      // основной фильтр для визуализации
+delta_sma_10 = ta.sma(delta, 10)                  // для определения силы дельты
+volume_sma_20 = ta.sma(volume, 20)                // для фильтрации объема
+
+// ==============================================================================
+// ДЕТЕКЦИЯ ЛОВУШЕК (TRAPS) — КЛЮЧЕВАЯ ЛОГИКА ОЛЕГА
+// ==============================================================================
+// --- BULL TRAP (ложный дамп) — фильтр против шорта / сигнал на лонг ---
+red_candle = close < open  // медвежья свеча
+long_lower_shadow = lower_shadow > body * shadow_ratio  // длинная нижняя тень
+// ИСПРАВЛЕНО: используем ПРЕДВЫЧИСЛЕННУЮ delta_sma_10 вместо вызова внутри условия
+strong_buy_delta = delta > 0 and delta > delta_sma_10 * delta_strength_mult
+volume_ok = volume > volume_sma_20 * volume_mult
+bull_trap = red_candle and long_lower_shadow and strong_buy_delta and volume_ok
+
+// --- BEAR TRAP (ложный памп) — фильтр против лонга / сигнал на шорт ---
+green_candle = close > open  // бычья свеча
+long_upper_shadow = upper_shadow > body * shadow_ratio  // длинная верхняя тень
+// ИСПРАВЛЕНО: используем ПРЕДВЫЧИСЛЕННУЮ delta_sma_10 вместо вызова внутри условия
+strong_sell_delta = delta < 0 and delta < delta_sma_10 * -delta_strength_mult
+bear_trap = green_candle and long_upper_shadow and strong_sell_delta and volume_ok
+
+// ==============================================================================
+// ЦВЕТОВАЯ СХЕМА ДЛЯ СТОЛБЦОВ ДЕЛЬТЫ (без меток для сохранения масштаба)
+// ==============================================================================
+delta_color = 
+  bull_trap ? color.new(color.orange, 0) :      // Bull Trap — оранжевый (фильтр против шорта)
+  bear_trap ? color.new(color.purple, 0) :      // Bear Trap — фиолетовый (фильтр против лонга)
+  delta > 0 ? color.new(color.green, 0) :       // Обычная покупка — зеленый
+  color.new(color.red, 0)                       // Обычная продажа — красный
+
+// ==============================================================================
+// ВИЗУАЛИЗАЦИЯ (ТОЛЬКО СТОЛБЦЫ ДЕЛЬТЫ — МАСШТАБ СОХРАНЕН)
+// ==============================================================================
+plot(delta, title="Delta Volume", style=plot.style_columns, color=delta_color, linewidth=2)
+plot(delta_sma_filter, title="Delta SMA Filter", color=color.new(color.blue, 50), linewidth=1, style=plot.style_line)
+
+// Горизонтальные линии для ориентира экстремумов
+hline(0, "Zero", color=color.gray, linestyle=hline.style_dashed)
+hline(4, "+4 Std", color=color.white, linestyle=hline.style_dotted)
+hline(-4, "-4 Std", color=color.white, linestyle=hline.style_dotted)
+
+// ==============================================================================
+// ИНФОРМАЦИОННЫЕ МЕТКИ В ДАТА-ВИНДОУ (без нарушения масштаба)
+// ==============================================================================
+// Сигналы отображаются ТОЛЬКО через цвет столбцов и в Data Window при наведении
+// Все потенциально нарушающие масштаб элементы (plotshape/plotchar с location) удалены
